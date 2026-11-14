@@ -1,0 +1,670 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport"
+content="width=device-width, initial-scale=1">
+<title>유성구 교통취약계층 상세 시뮬레이션</title>
+
+<link rel="stylesheet"
+href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css">
+
+<script
+src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js">
+</script>
+
+<style>
+* {box-sizing:border-box}
+body {
+    margin:0;
+    font-family:Arial,sans-serif;
+    background:#f1f5f9;
+    color:#172033;
+}
+header {
+    background:#142b43;
+    color:white;
+    padding:16px 22px;
+}
+header h2 {margin:0 0 6px}
+header small {color:#cbd5e1}
+#layout {
+    display:flex;
+    height:calc(100vh - 78px);
+}
+#panel {
+    width:310px;
+    background:white;
+    padding:18px;
+    overflow:auto;
+    border-right:1px solid #ddd;
+}
+#map {
+    flex:1;
+    background:#f4f2ed;
+}
+button,select {
+    padding:9px 12px;
+    border:1px solid #cbd5e1;
+    border-radius:6px;
+    background:white;
+    cursor:pointer;
+}
+button.active {
+    background:#2563eb;
+    color:white;
+    border-color:#2563eb;
+}
+.phase {
+    display:flex;
+    gap:5px;
+    margin-bottom:18px;
+}
+.phase button {flex:1}
+.stat {
+    background:#f1f5f9;
+    padding:12px;
+    margin:8px 0;
+    border-radius:8px;
+}
+.stat strong {
+    font-size:24px;
+    display:block;
+    margin-top:5px;
+}
+#clock {
+    font-size:32px;
+    font-weight:bold;
+    text-align:center;
+    margin:12px;
+}
+input[type=range] {width:100%}
+.controls {
+    display:flex;
+    gap:6px;
+    margin:10px 0;
+}
+label {
+    display:block;
+    margin:12px 0;
+}
+.legend {
+    font-size:13px;
+    line-height:1.9;
+}
+.dot {
+    width:10px;
+    height:10px;
+    display:inline-block;
+    border-radius:50%;
+    margin-right:6px;
+}
+.note {
+    font-size:12px;
+    color:#64748b;
+    line-height:1.6;
+}
+#loading {
+    position:absolute;
+    top:50%;
+    left:60%;
+    z-index:9999;
+    background:white;
+    padding:22px;
+    border-radius:10px;
+    box-shadow:0 3px 20px #0003;
+}
+</style>
+</head>
+<body>
+
+<header>
+<h2>유성여지도 | 교통취약계층 이동 시뮬레이션</h2>
+<small>
+95개 분석 격자 · 9,998명 · 상세 OSM 도로망
+</small>
+</header>
+
+<div id="layout">
+<div id="panel">
+
+<h3>공사 단계</h3>
+
+<div class="phase">
+<button class="active" onclick="setPhase(0)">공사 전</button>
+<button onclick="setPhase(1)">공사 중</button>
+<button onclick="setPhase(2)">개통 후</button>
+</div>
+
+<div id="clock">07:00</div>
+
+<input type="range" id="time"
+min="360" max="1320" value="420">
+
+<div class="controls">
+<button id="play">▶ 재생</button>
+<select id="speed">
+<option value="1">1배속</option>
+<option value="10" selected>10배속</option>
+<option value="30">30배속</option>
+<option value="60">60배속</option>
+</select>
+</div>
+
+<label>행정동 선택</label>
+<select id="dong" style="width:100%">
+<option value="all">전체 행정동</option>
+</select>
+
+<div class="stat">
+분석 대상
+<strong id="total">9,998명</strong>
+</div>
+
+<div class="stat">
+현재 이동 중
+<strong id="moving">0명</strong>
+</div>
+
+<div class="stat">
+평균 편도 이동시간
+<strong id="avg">-</strong>
+</div>
+
+<label>
+<input type="checkbox" id="homes" checked>
+거주지 표시
+</label>
+
+<label>
+<input type="checkbox" id="buildings" checked>
+건물 표시
+</label>
+
+<label>
+<input type="checkbox" id="roads" checked>
+도로 표시
+</label>
+
+<h3>주민 유형</h3>
+
+<div class="legend">
+<span class="dot" style="background:#ef4444"></span>고령자<br>
+<span class="dot" style="background:#2563eb"></span>학생<br>
+<span class="dot" style="background:#9333ea"></span>장애인<br>
+<span class="dot" style="background:#f59e0b"></span>거주지
+</div>
+
+<p class="note">
+지도: OpenStreetMap contributors<br>
+이동: 상세 도로망 최단경로 기반<br>
+시간: 기존 전·중·후 추정값을 사용한 시각화<br>
+버스 경로는 실제 운행 노선이 아닌 후보 경로입니다.
+</p>
+
+</div>
+
+<div id="map"></div>
+</div>
+
+<div id="loading">상세 지도 불러오는 중...</div>
+
+<script>
+
+const map = L.map("map", {
+    preferCanvas:true,
+    zoomControl:true
+}).setView([36.38,127.35],12);
+
+map.attributionControl.addAttribution(
+    '&copy; OpenStreetMap contributors'
+);
+
+let DATA;
+let phase = 0;
+let time = 420;
+let playing = false;
+
+const background = L.layerGroup().addTo(map);
+const homeLayer = L.layerGroup().addTo(map);
+const movingLayer = L.layerGroup().addTo(map);
+
+const renderer = L.canvas({padding:0.3});
+
+let mapFeatures = [];
+
+function color(group) {
+    if(group === "elderly") return "#ef4444";
+    if(group === "student") return "#2563eb";
+    return "#9333ea";
+}
+
+function roadStyle(highway) {
+
+    if(["motorway","trunk"].includes(highway))
+        return {color:"#e4a84b",weight:4};
+
+    if(highway === "primary")
+        return {color:"#e8c574",weight:3.5};
+
+    if(highway === "secondary")
+        return {color:"#d4b984",weight:3};
+
+    if(highway === "tertiary")
+        return {color:"#b9b9b9",weight:2};
+
+    if(["footway","path","steps"].includes(highway))
+        return {color:"#c9bba7",weight:1};
+
+    return {color:"#c4c8ca",weight:1.3};
+}
+
+function getStyle(f) {
+
+    const p = f.properties;
+
+    if(p.category === "road")
+        return {
+            ...roadStyle(p.highway),
+            opacity:0.9
+        };
+
+    if(p.category === "building")
+        return {
+            color:"#c8bdb1",
+            fillColor:"#ded5cb",
+            weight:0.6,
+            fillOpacity:0.85
+        };
+
+    if(p.category === "green")
+        return {
+            color:"#b5d5a6",
+            fillColor:"#d5e8c7",
+            weight:0.7,
+            fillOpacity:0.85
+        };
+
+    if(p.category === "water")
+        return {
+            color:"#8cc4df",
+            fillColor:"#b4ddef",
+            weight:2,
+            fillOpacity:0.9
+        };
+
+    return {
+        color:"#b1c7c9",
+        fillColor:"#d9e7e8",
+        weight:1,
+        fillOpacity:0.8
+    };
+}
+
+function getBounds(f) {
+
+    const g = f.geometry;
+
+    let points;
+
+    if(g.type === "Point")
+        points = [g.coordinates];
+    else if(g.type === "Polygon")
+        points = g.coordinates[0];
+    else
+        points = g.coordinates;
+
+    let xmin=180,xmax=-180;
+    let ymin=90,ymax=-90;
+
+    for(const p of points) {
+        xmin=Math.min(xmin,p[0]);
+        xmax=Math.max(xmax,p[0]);
+        ymin=Math.min(ymin,p[1]);
+        ymax=Math.max(ymax,p[1]);
+    }
+
+    return [xmin,ymin,xmax,ymax];
+}
+
+function drawBackground() {
+
+    background.clearLayers();
+
+    const bounds=map.getBounds().pad(0.15);
+    const zoom=map.getZoom();
+
+    const order={
+        green:0,water:1,
+        building:2,facility:3,road:4
+    };
+
+    const visible=mapFeatures.filter(f=>{
+
+        const p=f.properties;
+        const b=f._bounds;
+
+        if(b[2]<bounds.getWest() ||
+           b[0]>bounds.getEast() ||
+           b[3]<bounds.getSouth() ||
+           b[1]>bounds.getNorth())
+            return false;
+
+        if(p.category==="building")
+            return zoom>=14 &&
+                document.getElementById("buildings").checked;
+
+        if(p.category==="road") {
+
+            if(!document.getElementById("roads").checked)
+                return false;
+
+            if(zoom<13)
+                return [
+                    "motorway","trunk","primary",
+                    "secondary","tertiary"
+                ].includes(p.highway);
+
+            if(zoom<15)
+                return ![
+                    "footway","path","steps",
+                    "service","track"
+                ].includes(p.highway);
+        }
+
+        if(f.geometry.type==="Point")
+            return zoom>=15;
+
+        return true;
+
+    }).sort((a,b)=>
+        order[a.properties.category]-
+        order[b.properties.category]
+    );
+
+    L.geoJSON(visible,{
+        renderer:renderer,
+        style:getStyle,
+        pointToLayer:(f,ll)=>L.circleMarker(ll,{
+            renderer:renderer,
+            radius:3,
+            color:"#64748b",
+            fillOpacity:0.9
+        }),
+        onEachFeature:(f,l)=>{
+            if(f.properties.name){
+                const text=document.createElement("span");
+                text.textContent=f.properties.name;
+                l.bindTooltip(text);
+            }
+        }
+    }).addTo(background);
+}
+
+function selectedPeople() {
+
+    const dong=document.getElementById("dong").value;
+
+    return DATA.people.filter(p=>
+        dong==="all" || p.dong===dong
+    );
+}
+
+function drawHomes() {
+
+    homeLayer.clearLayers();
+
+    if(!document.getElementById("homes").checked)
+        return;
+
+    const homes={};
+
+    for(const p of selectedPeople()){
+
+        const key=p.home.join(",");
+
+        if(!homes[key])
+            homes[key]={
+                pos:p.home,
+                count:0,
+                dong:p.dong
+            };
+
+        homes[key].count++;
+    }
+
+    for(const h of Object.values(homes)){
+
+        L.circleMarker(h.pos,{
+            renderer:renderer,
+            radius:Math.min(
+                12,3+Math.sqrt(h.count)/3
+            ),
+            color:"#ffffff",
+            weight:1,
+            fillColor:"#f59e0b",
+            fillOpacity:0.8
+        }).bindTooltip(
+            h.dong+" / "+h.count+"명"
+        ).addTo(homeLayer);
+    }
+}
+
+function roadPosition(route,fraction){
+
+    if(!route || !route.points.length)
+        return null;
+
+    if(route.points.length===1)
+        return route.points[0];
+
+    const target=route.length*
+        Math.max(0,Math.min(1,fraction));
+
+    const c=route.cumulative;
+
+    let lo=0,hi=c.length-1;
+
+    while(lo+1<hi){
+
+        const mid=(lo+hi)>>1;
+
+        if(c[mid]<target) lo=mid;
+        else hi=mid;
+    }
+
+    const a=route.points[lo];
+    const b=route.points[hi];
+
+    const f=(target-c[lo])/
+        Math.max(0.001,c[hi]-c[lo]);
+
+    return [
+        a[0]+(b[0]-a[0])*f,
+        a[1]+(b[1]-a[1])*f
+    ];
+}
+
+function drawPeople(){
+
+    if(!DATA)return;
+
+    movingLayer.clearLayers();
+
+    let moving=0;
+    let totalTime=0;
+
+    const people=selectedPeople();
+
+    for(const p of people){
+
+        const duration=p.times[phase];
+        totalTime+=duration;
+
+        const pair=p.phases[phase];
+
+        if(!pair)continue;
+
+        let route=null;
+        let fraction=0;
+
+        const elapsed=time-p.departure;
+
+        const returnStart=Math.max(
+            p.returnDeparture,
+            p.departure+duration
+        );
+
+        if(elapsed>=0 && elapsed<duration){
+
+            route=DATA.routes[pair.out];
+            fraction=elapsed/Math.max(duration,0.01);
+
+        }else if(
+            time>=returnStart &&
+            time<returnStart+duration
+        ){
+
+            route=DATA.routes[pair.back];
+
+            fraction=(time-returnStart)/
+                Math.max(duration,0.01);
+        }
+
+        if(!route)continue;
+
+        const pos=roadPosition(route,fraction);
+
+        if(!pos)continue;
+
+        moving++;
+
+        L.circleMarker(pos,{
+            renderer:renderer,
+            radius:3.2,
+            stroke:false,
+            fillColor:color(p.group),
+            fillOpacity:0.9
+        }).addTo(movingLayer);
+    }
+
+    document.getElementById("moving").textContent=
+        moving.toLocaleString()+"명";
+
+    document.getElementById("total").textContent=
+        people.length.toLocaleString()+"명";
+
+    document.getElementById("avg").textContent=
+        (totalTime/Math.max(people.length,1))
+        .toFixed(2)+"분";
+
+    const h=Math.floor(time/60);
+    const m=Math.floor(time%60);
+
+    document.getElementById("clock").textContent=
+        String(h).padStart(2,"0")+":"+
+        String(m).padStart(2,"0");
+
+    document.getElementById("time").value=time;
+}
+
+function setPhase(value){
+
+    phase=value;
+
+    document.querySelectorAll(".phase button")
+        .forEach((b,i)=>
+            b.classList.toggle("active",i===value)
+        );
+
+    drawPeople();
+}
+
+document.getElementById("time").oninput=e=>{
+    time=Number(e.target.value);
+    drawPeople();
+};
+
+document.getElementById("play").onclick=()=>{
+
+    playing=!playing;
+
+    document.getElementById("play").textContent=
+        playing?"Ⅱ 일시정지":"▶ 재생";
+};
+
+document.getElementById("dong").onchange=()=>{
+    drawHomes();
+    drawPeople();
+};
+
+document.getElementById("homes").onchange=drawHomes;
+document.getElementById("roads").onchange=drawBackground;
+document.getElementById("buildings").onchange=drawBackground;
+
+map.on("moveend",drawBackground);
+
+setInterval(()=>{
+
+    if(!playing || !DATA)return;
+
+    time+=Number(
+        document.getElementById("speed").value
+    )/60*0.25;
+
+    if(time>1320)time=360;
+
+    drawPeople();
+
+},250);
+
+async function init(){
+
+    try{
+
+        const results=await Promise.all([
+            fetch("yuseong_detail_map.json")
+                .then(r=>r.json()),
+            fetch("yuseong_simulation_data.json")
+                .then(r=>r.json())
+        ]);
+
+        mapFeatures=results[0].features;
+        DATA=results[1];
+
+        for(const f of mapFeatures)
+            f._bounds=getBounds(f);
+
+        const dongs=[
+            ...new Set(DATA.people.map(p=>p.dong))
+        ].sort();
+
+        for(const dong of dongs){
+
+            const option=document.createElement("option");
+            option.value=dong;
+            option.textContent=dong;
+
+            document.getElementById("dong")
+                .appendChild(option);
+        }
+
+        drawBackground();
+        drawHomes();
+        drawPeople();
+
+        document.getElementById("loading")
+            .style.display="none";
+
+    }catch(e){
+
+        document.getElementById("loading")
+            .textContent="Loading error: "+e.message;
+    }
+}
+
+init();
+
+</script>
+</body>
+</html>
